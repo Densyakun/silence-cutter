@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "silence-cut"
+version = "0.1.0"
+description = "FFmpeg ベースの無音検出・カットプラン生成 (プラグイン非依存の共通コア)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Densyakun", email = "densyakun1128@gmail.com" }]
+keywords = ["silence", "video", "audio", "ffmpeg", "editing"]
+dependencies = []
+
+[project.scripts]
+silence-cut = "silence_cut.cli:main"
+silence-cut-gui = "silence_cut.gui:main"
+
+[tool.setuptools]
+packages = ["silence_cut"]

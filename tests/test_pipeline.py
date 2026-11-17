@@ -1,0 +1,102 @@
+import math
+import shutil
+import struct
+import tempfile
+import unittest
+import wave
+from pathlib import Path
+
+from silence_cut.media import MediaError, measure_levels, probe
+from silence_cut.pipeline import analyze_file
+from silence_cut.render import build_command, render
+from silence_cut.settings import AnalysisSettings
+
+SAMPLE_RATE = 16000
+
+
+def _tone(seconds, frequency=440.0, amplitude=0.3):
+    frames = bytearray()
+    for index in range(int(SAMPLE_RATE * seconds)):
+        value = amplitude * math.sin(2 * math.pi * frequency * index / SAMPLE_RATE)
+        frames += struct.pack("<h", int(value * 32767))
+    return bytes(frames)
+
+
+def _silence(seconds):
+    return b"\x00\x00" * int(SAMPLE_RATE * seconds)
+
+
+HAS_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+
+
+@unittest.skipUnless(HAS_FFMPEG, "FFmpeg / ffprobe が必要です")
+class PipelineTest(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.path = Path(self.folder.name) / "sample.wav"
+        with wave.open(str(self.path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(SAMPLE_RATE)
+            handle.writeframes(_tone(0.6) + _silence(1.2) + _tone(0.6))
+
+    def tearDown(self):
+        self.folder.cleanup()
+
+    def test_probe_reads_audio_metadata(self):
+        info = probe(self.path)
+        self.assertTrue(info.has_audio)
+        self.assertFalse(info.has_video)
+        self.assertAlmostEqual(info.duration, 2.4, places=1)
+
+    def test_measure_levels_marks_silence(self):
+        settings = AnalysisSettings(frame_ms=20.0)
+        levels = measure_levels(self.path, settings)
+        self.assertAlmostEqual(levels.duration, 2.4, places=1)
+        middle = levels.db[len(levels.db) // 2]
+        self.assertLess(middle, -60.0)
+
+    def test_analyze_file_builds_plan(self):
+        settings = AnalysisSettings(
+            threshold_db=-45.0, min_silence=0.5, min_speech=0.15,
+            pad_start=0.0, pad_end=0.0,
+        )
+        result = analyze_file(self.path, settings)
+        self.assertEqual(len(result.plan.keep), 2)
+        self.assertEqual(len(result.plan.cut), 1)
+        self.assertAlmostEqual(result.plan.cut[0].duration, 1.2, places=1)
+        payload = result.to_dict()
+        self.assertIn("timeline", payload)
+        self.assertTrue(payload["source"]["has_audio"])
+
+    def test_render_cuts_silence(self):
+        settings = AnalysisSettings(
+            threshold_db=-45.0, min_silence=0.5, min_speech=0.15,
+            pad_start=0.0, pad_end=0.0,
+        )
+        result = analyze_file(self.path, settings)
+        target = Path(self.folder.name) / "out.wav"
+        render(result.plan, target)
+        self.assertTrue(target.is_file())
+        with wave.open(str(target), "rb") as handle:
+            duration = handle.getnframes() / handle.getframerate()
+        self.assertAlmostEqual(duration, 1.2, places=1)
+
+        command = build_command(result.plan, Path(self.folder.name) / "cmd.wav")
+        self.assertIn("-filter_complex", command)
+        self.assertIn("concat=n=2", " ".join(command))
+
+    def test_render_rejects_empty_plan(self):
+        settings = AnalysisSettings(threshold_db=-45.0, min_silence=0.5)
+        result = analyze_file(self.path, settings)
+        result.plan.keep = []
+        with self.assertRaises(ValueError):
+            render(result.plan, Path(self.folder.name) / "empty.wav")
+
+    def test_missing_stream_raises(self):
+        with self.assertRaises(MediaError):
+            probe(Path(self.folder.name) / "missing.mp4")
+
+
+if __name__ == "__main__":
+    unittest.main()
