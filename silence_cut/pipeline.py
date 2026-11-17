@@ -55,5 +55,8 @@ def analyze_file(
         fps=media.fps or 30.0,
         has_video=media.has_video,
         has_audio=media.has_audio,
+        width=media.width,
+        height=media.height,
+        audio_sample_rate=media.audio_sample_rate,
     )
     return AnalysisResult(media=media, levels=levels, plan=plan)

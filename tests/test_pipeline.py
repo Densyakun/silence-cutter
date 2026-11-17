@@ -1,3 +1,4 @@
+import io
 import math
 import shutil
 import struct
@@ -5,7 +6,9 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from unittest import mock
 
+from silence_cut.detect import CutPlan, Span
 from silence_cut.media import MediaError, measure_levels, probe
 from silence_cut.pipeline import analyze_file
 from silence_cut.render import build_command, render
@@ -58,7 +61,8 @@ class PipelineTest(unittest.TestCase):
 
     def test_analyze_file_builds_plan(self):
         settings = AnalysisSettings(
-            threshold_db=-45.0, min_silence=0.5, min_speech=0.15,
+            detection="silence", threshold_db=-45.0,
+            min_silence=0.5, min_speech=0.15,
             pad_start=0.0, pad_end=0.0,
         )
         result = analyze_file(self.path, settings)
@@ -84,7 +88,8 @@ class PipelineTest(unittest.TestCase):
 
     def test_render_cuts_silence(self):
         settings = AnalysisSettings(
-            threshold_db=-45.0, min_silence=0.5, min_speech=0.15,
+            detection="silence", threshold_db=-45.0,
+            min_silence=0.5, min_speech=0.15,
             pad_start=0.0, pad_end=0.0,
         )
         result = analyze_file(self.path, settings)
@@ -99,8 +104,51 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("-filter_complex", command)
         self.assertIn("concat=n=2", " ".join(command))
 
+    def test_render_uses_filter_script_for_long_graph(self):
+        plan = CutPlan(
+            source=str(self.path),
+            duration=20000.0,
+            keep=[
+                Span(index * 0.5, index * 0.5 + 0.25)
+                for index in range(2000)
+            ],
+            has_video=False,
+            has_audio=True,
+        )
+        target = Path(self.folder.name) / "long.wav"
+        captured = {}
+
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self):
+                self.stdout = io.StringIO("out_time_us=1000000\nprogress=end\n")
+                self.stderr = io.StringIO("")
+
+            def wait(self):
+                return 0
+
+            def poll(self):
+                return 0
+
+        def fake_popen(command, **kwargs):
+            captured["command"] = command
+            index = command.index("-filter_complex_script")
+            captured["script_path"] = Path(command[index + 1])
+            captured["script"] = captured["script_path"].read_text(encoding="utf-8")
+            return FakeProcess()
+
+        with mock.patch("silence_cut.render.subprocess.Popen", fake_popen):
+            render(plan, target)
+
+        self.assertIn("-filter_complex_script", captured["command"])
+        self.assertNotIn("-filter_complex", captured["command"])
+        self.assertGreater(len(captured["script"]), 32767)
+        self.assertIn("atrim=", captured["script"])
+        self.assertFalse(captured["script_path"].exists())
+
     def test_render_rejects_empty_plan(self):
-        settings = AnalysisSettings(threshold_db=-45.0, min_silence=0.5)
+        settings = AnalysisSettings(detection="silence", threshold_db=-45.0, min_silence=0.5)
         result = analyze_file(self.path, settings)
         result.plan.keep = []
         with self.assertRaises(ValueError):

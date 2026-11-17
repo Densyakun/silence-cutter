@@ -11,7 +11,7 @@ requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Densyakun", email = "densyakun1128@gmail.com" }]
 keywords = ["silence", "video", "audio", "ffmpeg", "editing"]
-dependencies = []
+dependencies = ["tkinterdnd2>=0.4"]
 
 [project.scripts]
 silence-cut = "silence_cut.cli:main"

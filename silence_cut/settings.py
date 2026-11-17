@@ -9,12 +9,12 @@ class AnalysisSettings:
     """解析パラメータ。
 
     すべて秒・dBFS 単位。dBFS は 0 dB がフルスケールで、値が小さいほど静か。
-    ``detection="silence"`` は静かな区間をカットし、
-    ``detection="speech"`` は発話区間だけを残す（無声カット）。
+    ``detection="speech"``（既定）は発話区間だけを残す（無声カット）、
+    ``detection="silence"`` は静かな区間をカットする。
     """
 
-    # "silence": 無音をカット / "speech": 発話以外をカット (無声カット)
-    detection: str = "silence"
+    # "speech": 発話以外をカット (無声カット・既定) / "silence": 無音をカット
+    detection: str = "speech"
     # この値より静かな区間を無音とみなす (dBFS)
     threshold_db: float = -45.0
     # これ以上続く無音だけをカット対象にする (秒)
@@ -44,8 +44,6 @@ class AnalysisSettings:
     def validated(self) -> "AnalysisSettings":
         if self.detection not in ("silence", "speech"):
             raise ValueError("検出モードは 'silence' または 'speech' を指定してください")
-        if not -100.0 <= self.threshold_db <= 0.0:
-            raise ValueError("しきい値は -100〜0 dB の範囲で指定してください")
         if not 0.0 <= self.min_silence <= 600.0:
             raise ValueError("最小無音長は 0〜600 秒の範囲で指定してください")
         if not 0.0 <= self.min_speech <= 60.0:
@@ -54,11 +52,14 @@ class AnalysisSettings:
             raise ValueError("余白は 0〜10 秒の範囲で指定してください")
         if not 1.0 <= self.frame_ms <= 200.0:
             raise ValueError("フレーム長は 1〜200 ms の範囲で指定してください")
-        if self.adaptive:
-            if not 0.0 <= self.adaptive_percentile <= 100.0:
-                raise ValueError("ノイズフロア推定パーセンタイルは 0〜100 で指定してください")
-            if not 0.0 <= self.adaptive_margin_db <= 60.0:
-                raise ValueError("自動しきい値のマージンは 0〜60 dB で指定してください")
+        if self.detection == "silence":
+            if not -100.0 <= self.threshold_db <= 0.0:
+                raise ValueError("しきい値は -100〜0 dB の範囲で指定してください")
+            if self.adaptive:
+                if not 0.0 <= self.adaptive_percentile <= 100.0:
+                    raise ValueError("ノイズフロア推定パーセンタイルは 0〜100 で指定してください")
+                if not 0.0 <= self.adaptive_margin_db <= 60.0:
+                    raise ValueError("自動しきい値のマージンは 0〜60 dB で指定してください")
         if self.detection == "speech":
             if not 0.0 <= self.snr_exit_db <= 60.0:
                 raise ValueError("終了SNRは 0〜60 dB の範囲で指定してください")

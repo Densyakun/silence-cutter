@@ -18,6 +18,7 @@ def levels_from(pattern, frame_ms=20.0):
 
 
 BASE = AnalysisSettings(
+    detection="silence",
     threshold_db=-45.0,
     min_silence=0.5,
     min_speech=0.15,
@@ -27,6 +28,12 @@ BASE = AnalysisSettings(
 
 
 class BuildPlanTest(unittest.TestCase):
+    def test_default_detection_is_speech(self):
+        self.assertEqual(AnalysisSettings().detection, "speech")
+
+    def test_speech_mode_does_not_validate_silence_threshold(self):
+        AnalysisSettings(detection="speech", threshold_db=10.0).validated()
+
     def test_detects_two_speech_spans(self):
         levels = levels_from([(-20, 1.0), (-80, 1.0), (-20, 1.0)])
         plan = build_plan(levels, BASE)

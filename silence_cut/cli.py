@@ -25,8 +25,8 @@ def _configure_stdio() -> None:
 
 
 def _add_analysis_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--mode", choices=("silence", "speech"), default="silence",
-                        help="silence=無音カット / speech=無声カット (発話区間のみ残す)")
+    parser.add_argument("--mode", choices=("speech", "silence"), default="speech",
+                        help="speech=無声カット (既定・発話区間のみ残す) / silence=無音カット")
     parser.add_argument("-t", "--threshold", type=float, default=AnalysisSettings.threshold_db,
                         help="無音とみなす音量 (dBFS、既定: -45)")
     parser.add_argument("-s", "--min-silence", type=float, default=AnalysisSettings.min_silence,
@@ -143,7 +143,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     if args.fps:
         plan.fps = args.fps
     written: List[Path] = []
-    for option, fmt in (("json", "json"), ("csv", "csv"), ("edl", "edl")):
+    for option, fmt in (
+        ("json", "json"), ("csv", "csv"), ("edl", "edl"), ("exo", "exo"),
+        ("xml", "xml"), ("fcpxml", "fcpxml"),
+    ):
         destination = getattr(args, option)
         if destination:
             written.append(write_plan(plan, destination, fmt=fmt))
@@ -214,7 +217,18 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--json", help="カットプラン JSON の保存先")
     analyze_parser.add_argument("--csv", help="区間一覧 CSV の保存先")
     analyze_parser.add_argument("--edl", help="CMX3600 EDL の保存先")
-    analyze_parser.add_argument("--fps", type=float, help="EDL に使う fps (既定は素材から取得)")
+    analyze_parser.add_argument(
+        "--exo", help="AviUtl 拡張編集オブジェクト (.exo) の保存先",
+    )
+    analyze_parser.add_argument(
+        "--xml", help="Premiere Pro / DaVinci Resolve 用 XMEML XML の保存先",
+    )
+    analyze_parser.add_argument(
+        "--fcpxml", help="Final Cut Pro / DaVinci Resolve 用 FCPXML の保存先",
+    )
+    analyze_parser.add_argument(
+        "--fps", type=float, help="XML / EDL に使う fps (既定は素材から取得)",
+    )
     analyze_parser.add_argument("--limit", type=int, default=40,
                                 help="表示する区間の最大数 (既定: 40)")
     analyze_parser.set_defaults(func=cmd_analyze)
@@ -225,8 +239,8 @@ def build_parser() -> argparse.ArgumentParser:
     cut_parser.add_argument("input")
     _add_analysis_args(cut_parser)
     cut_parser.add_argument("-o", "--output", help="出力ファイル (既定: <入力名>_cut.mp4)")
-    cut_parser.add_argument("--plan", help="カットプラン JSON も保存する")
-    cut_parser.add_argument("--fps", type=float, help="EDL 用 fps (プラン保存時に使用)")
+    cut_parser.add_argument("--plan", help="カットプランも保存する (拡張子で形式を判定)")
+    cut_parser.add_argument("--fps", type=float, help="XML / EDL 用 fps (プラン保存時に使用)")
     cut_parser.add_argument("--crf", type=int, default=20, help="映像品質 (既定: 20)")
     cut_parser.add_argument("--preset", default="medium", help="x264 プリセット (既定: medium)")
     cut_parser.add_argument("--audio-bitrate", default="192k", help="音声ビットレート (既定: 192k)")

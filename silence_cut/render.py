@@ -162,6 +162,18 @@ def _parse_progress(line: str, total: float) -> Optional[float]:
     return None
 
 
+def _write_filter_script(chain: str) -> Path:
+    """長い filter_complex をコマンドラインではなくファイルで渡す。
+
+    Windows のコマンドライン上限 (32767 文字) を超えると
+    FileNotFoundError: [WinError 206] になるため、常にファイル経由にする。
+    """
+    handle, name = tempfile.mkstemp(prefix="silence-cut-filter-", suffix=".txt")
+    with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+        stream.write(chain)
+    return Path(name)
+
+
 def render(
     plan: CutPlan,
     output: PathLike,
@@ -178,6 +190,14 @@ def render(
         plan, target, settings, ffmpeg=ffmpeg, overwrite=overwrite,
         progress=progress is not None,
     )
+
+    filter_script: Optional[Path] = None
+    if "-filter_complex" in command:
+        index = command.index("-filter_complex")
+        filter_script = _write_filter_script(command[index + 1])
+        command[index] = "-filter_complex_script"
+        command[index + 1] = str(filter_script)
+
     proc = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         encoding="utf-8", errors="replace",
@@ -199,6 +219,8 @@ def render(
         for stream in (proc.stdout, proc.stderr):
             if stream is not None:
                 stream.close()
+        if filter_script is not None:
+            filter_script.unlink(missing_ok=True)
 
     if proc.returncode != 0:
         detail = stderr.strip().splitlines()
@@ -220,7 +242,8 @@ def render_preview(
     """低画質・高速設定でプレビュー用ファイルを作る。"""
     folder = Path(directory) if directory else Path(tempfile.mkdtemp(prefix="silence-cut-"))
     folder.mkdir(parents=True, exist_ok=True)
-    target = folder / f"{Path(plan.source).stem}_preview.mp4"
+    stem = Path(plan.source).stem[:48] or "preview"
+    target = folder / f"{stem}_preview.mp4"
     settings = RenderSettings(preset="ultrafast", crf=30, audio_bitrate="128k")
     return render(plan, target, settings, ffmpeg=ffmpeg, progress=progress)
 

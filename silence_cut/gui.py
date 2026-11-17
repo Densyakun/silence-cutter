@@ -5,13 +5,14 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from .detect import CutPlan
 from .export import write_plan
 from .media import MediaError
 from .pipeline import AnalysisResult, analyze_file
-from .render import RenderSettings, play_file, render, render_preview
+from .preview import PreviewSession
+from .render import RenderSettings, render
 from .settings import AnalysisSettings
 
 APP_TITLE = "Silence Cut - 無音カット"
@@ -34,26 +35,48 @@ class SilenceCutApp:
         self._label = ""
         self._waveform_job: Optional[str] = None
         self._controls = []
+        self.preview_window: Optional[tk.Toplevel] = None
+        self.preview_session: Optional[PreviewSession] = None
+        self._preview_video: Optional[tk.Frame] = None
+        self._preview_after: Optional[str] = None
+        self._preview_dragging = False
+        self._file_drop = None
 
         root.title(APP_TITLE)
-        root.geometry("1100x760")
-        root.minsize(860, 600)
+        root.geometry("1100x820")
+        root.minsize(900, 680)
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        self._speech_controls = []
+        self._silence_controls = []
         self.var_file = tk.StringVar()
-        self.var_mode = tk.StringVar(value="silence")
+        self.var_mode = tk.StringVar(value="speech")
         self.var_threshold = tk.StringVar(value=f"{AnalysisSettings.threshold_db:g}")
         self.var_min_silence = tk.StringVar(value=f"{AnalysisSettings.min_silence:g}")
         self.var_min_speech = tk.StringVar(value=f"{AnalysisSettings.min_speech:g}")
         self.var_pad_start = tk.StringVar(value=f"{AnalysisSettings.pad_start:g}")
         self.var_pad_end = tk.StringVar(value=f"{AnalysisSettings.pad_end:g}")
+        self.var_frame_ms = tk.StringVar(value=f"{AnalysisSettings.frame_ms:g}")
         self.var_snr = tk.StringVar(value=f"{AnalysisSettings.snr_min_db:g}")
+        self.var_snr_exit = tk.StringVar(value=f"{AnalysisSettings.snr_exit_db:g}")
         self.var_hangover = tk.StringVar(value=f"{AnalysisSettings.hangover:g}")
+        self.var_noise_percentile = tk.StringVar(
+            value=f"{AnalysisSettings.noise_percentile:g}",
+        )
         self.var_adaptive = tk.BooleanVar(value=False)
-        self.var_status = tk.StringVar(value="動画または音声ファイルを選択してください")
+        self.var_adaptive_margin = tk.StringVar(
+            value=f"{AnalysisSettings.adaptive_margin_db:g}",
+        )
+        self.var_mode_hint = tk.StringVar(value="")
+        self.var_status = tk.StringVar(
+            value="動画または音声ファイルを選択してください（ここへドラッグ＆ドロップも可）",
+        )
         self.var_summary = tk.StringVar(value="")
 
         self._build()
+        self._apply_mode_state()
         self._set_export_enabled(False)
+        self._enable_file_drop()
 
     # ------------------------------------------------------------------ UI
     def _build(self) -> None:
@@ -68,59 +91,105 @@ class SilenceCutApp:
         browse = ttk.Button(file_row, text="参照...", command=self.browse)
         browse.pack(side="left")
         self._controls.append(browse)
+        self.file_drop_hint = ttk.Label(
+            file_row, text="ドラッグ＆ドロップ可", foreground="#6b7280",
+        )
+        self.file_drop_hint.pack(side="left", padx=(8, 0))
 
         params = ttk.LabelFrame(outer, text="解析パラメータ", padding=8)
         params.pack(fill="x", pady=(10, 0))
-        fields = [
-            ("しきい値 (dBFS)", self.var_threshold, 1.0),
-            ("最小無音 (秒)", self.var_min_silence, 0.1),
-            ("最小発話 (秒)", self.var_min_speech, 0.05),
-            ("前余白 (秒)", self.var_pad_start, 0.01),
-            ("後余白 (秒)", self.var_pad_end, 0.01),
-        ]
-        for column, (label, variable, step) in enumerate(fields):
-            block = ttk.Frame(params)
-            block.grid(row=0, column=column, sticky="w", padx=(0, 14))
-            ttk.Label(block, text=label).pack(anchor="w")
-            spin = ttk.Spinbox(
-                block, textvariable=variable, from_=-100, to=600,
-                increment=step, width=9,
-            )
-            spin.pack(anchor="w")
-            self._controls.append(spin)
-        adaptive = ttk.Checkbutton(
-            params, text="しきい値を自動推定 (ノイズフロア + 9 dB)",
-            variable=self.var_adaptive,
-        )
-        adaptive.grid(row=0, column=len(fields), sticky="w", padx=(8, 0))
-        self._controls.append(adaptive)
 
         mode_row = ttk.Frame(params)
-        mode_row.grid(row=1, column=0, columnspan=len(fields) + 1, sticky="w", pady=(8, 0))
+        mode_row.pack(fill="x")
         ttk.Label(mode_row, text="検出モード:").pack(side="left")
-        radio_silence = ttk.Radiobutton(
-            mode_row, text="無音カット（静かな区間を除去）",
-            value="silence", variable=self.var_mode,
-        )
-        radio_silence.pack(side="left", padx=(8, 0))
         radio_speech = ttk.Radiobutton(
-            mode_row, text="無声カット（発話区間のみ残す）",
-            value="speech", variable=self.var_mode,
+            mode_row, text="無声カット（推奨・発話区間のみ残す）",
+            value="speech", variable=self.var_mode, command=self._on_mode_changed,
         )
         radio_speech.pack(side="left", padx=(8, 0))
-        ttk.Label(mode_row, text="SNR (dB)").pack(side="left", padx=(16, 4))
-        snr = ttk.Spinbox(
-            mode_row, textvariable=self.var_snr, from_=0, to=60,
-            increment=1, width=6,
+        radio_silence = ttk.Radiobutton(
+            mode_row, text="無音カット（静かな区間を除去）",
+            value="silence", variable=self.var_mode, command=self._on_mode_changed,
         )
-        snr.pack(side="left")
-        ttk.Label(mode_row, text="発話ホールド (秒)").pack(side="left", padx=(12, 4))
-        hangover = ttk.Spinbox(
-            mode_row, textvariable=self.var_hangover, from_=0, to=5,
-            increment=0.05, width=6,
+        radio_silence.pack(side="left", padx=(12, 0))
+        self._controls.extend([radio_speech, radio_silence])
+
+        ttk.Label(
+            params, textvariable=self.var_mode_hint, foreground="#4b5563",
+        ).pack(anchor="w", pady=(4, 0))
+
+        specific = ttk.Frame(params)
+        specific.pack(fill="x", pady=(8, 0))
+        specific.columnconfigure(0, weight=1)
+        specific.columnconfigure(1, weight=1)
+
+        speech_frame = ttk.LabelFrame(
+            specific, text="無声カット専用（発話区間検出）", padding=6,
         )
-        hangover.pack(side="left")
-        self._controls.extend([radio_silence, radio_speech, snr, hangover])
+        speech_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self._add_param_field(
+            speech_frame, "開始SNR (dB)", self.var_snr,
+            from_=0, to=60, increment=1, controls=self._speech_controls,
+        )
+        self._add_param_field(
+            speech_frame, "終了SNR (dB)", self.var_snr_exit,
+            from_=0, to=60, increment=1, controls=self._speech_controls,
+        )
+        self._add_param_field(
+            speech_frame, "発話ホールド (秒)", self.var_hangover,
+            from_=0, to=5, increment=0.05, controls=self._speech_controls,
+        )
+        self._add_param_field(
+            speech_frame, "ノイズフロア推定 (%)", self.var_noise_percentile,
+            from_=0, to=50, increment=1, controls=self._speech_controls,
+        )
+
+        silence_frame = ttk.LabelFrame(
+            specific, text="無音カット専用（音量しきい値）", padding=6,
+        )
+        silence_frame.grid(row=0, column=1, sticky="nsew")
+        silence_row = ttk.Frame(silence_frame)
+        silence_row.pack(fill="x")
+        self._add_param_field(
+            silence_row, "しきい値 (dBFS)", self.var_threshold,
+            from_=-100, to=0, increment=1, controls=self._silence_controls,
+        )
+        self._add_param_field(
+            silence_row, "自動マージン (dB)", self.var_adaptive_margin,
+            from_=0, to=60, increment=1, controls=self._silence_controls,
+        )
+        adaptive = ttk.Checkbutton(
+            silence_frame, text="しきい値を自動推定する",
+            variable=self.var_adaptive,
+        )
+        adaptive.pack(anchor="w", pady=(4, 0))
+        self._controls.append(adaptive)
+        self._silence_controls.append(adaptive)
+
+        common = ttk.LabelFrame(
+            params, text="共通設定（両モードで使用）", padding=6,
+        )
+        common.pack(fill="x", pady=(8, 0))
+        self._add_param_field(
+            common, "最小無音/非発話 (秒)", self.var_min_silence,
+            from_=0, to=600, increment=0.1,
+        )
+        self._add_param_field(
+            common, "最小発話 (秒)", self.var_min_speech,
+            from_=0, to=60, increment=0.05,
+        )
+        self._add_param_field(
+            common, "前余白 (秒)", self.var_pad_start,
+            from_=0, to=10, increment=0.01,
+        )
+        self._add_param_field(
+            common, "後余白 (秒)", self.var_pad_end,
+            from_=0, to=10, increment=0.01,
+        )
+        self._add_param_field(
+            common, "解析フレーム (ms)", self.var_frame_ms,
+            from_=1, to=200, increment=1,
+        )
 
         button_row = ttk.Frame(outer)
         button_row.pack(fill="x", pady=10)
@@ -171,6 +240,62 @@ class SilenceCutApp:
             side="left", padx=(8, 0),
         )
 
+    def _add_param_field(
+        self,
+        parent,
+        label: str,
+        variable: tk.StringVar,
+        *,
+        from_: float,
+        to: float,
+        increment: float,
+        width: int = 9,
+        controls: Optional[List] = None,
+    ) -> ttk.Spinbox:
+        block = ttk.Frame(parent)
+        block.pack(side="left", padx=(0, 12))
+        ttk.Label(block, text=label).pack(anchor="w")
+        spin = ttk.Spinbox(
+            block, textvariable=variable, from_=from_, to=to,
+            increment=increment, width=width,
+        )
+        spin.pack(anchor="w")
+        self._controls.append(spin)
+        if controls is not None:
+            controls.append(spin)
+        return spin
+
+    def _on_mode_changed(self) -> None:
+        self._apply_mode_state()
+
+    def _apply_mode_state(self) -> None:
+        mode = self.var_mode.get()
+        if self._busy:
+            speech_state = silence_state = "disabled"
+        else:
+            speech_state = "normal" if mode == "speech" else "disabled"
+            silence_state = "normal" if mode == "silence" else "disabled"
+        for widget in self._speech_controls:
+            try:
+                widget.configure(state=speech_state)
+            except tk.TclError:
+                pass
+        for widget in self._silence_controls:
+            try:
+                widget.configure(state=silence_state)
+            except tk.TclError:
+                pass
+        if mode == "speech":
+            self.var_mode_hint.set(
+                "無声カット: SNR（開始・終了）と発話ホールドを使います。"
+                "しきい値・自動推定は使いません。",
+            )
+        else:
+            self.var_mode_hint.set(
+                "無音カット: 音量しきい値（または自動推定）を使います。"
+                "SNR系の設定は使いません。",
+            )
+
     def _set_controls(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
         for widget in self._controls:
@@ -178,6 +303,8 @@ class SilenceCutApp:
                 widget.configure(state=state)
             except tk.TclError:
                 pass
+        if enabled:
+            self._apply_mode_state()
 
     def _set_export_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -197,7 +324,40 @@ class SilenceCutApp:
             self.var_file.set(path)
             self.load_file(path)
 
+    def _enable_file_drop(self) -> None:
+        try:
+            self.root.update_idletasks()
+            from .dnd import enable_file_drop
+            self._file_drop = enable_file_drop(self.root, self._on_files_dropped)
+        except Exception:
+            self._file_drop = None
+        if self._file_drop is None:
+            self.file_drop_hint.pack_forget()
+            self.var_status.set("動画または音声ファイルを選択してください")
+
+    def _on_files_dropped(self, paths: List[str]) -> None:
+        try:
+            self.root.after_idle(lambda: self._load_dropped_paths(paths))
+        except tk.TclError:
+            pass
+
+    def _load_dropped_paths(self, paths: List[str]) -> None:
+        if self._busy:
+            self.var_status.set("処理中はファイルを変更できません")
+            return
+        files = [path for path in paths if Path(path).is_file()]
+        if not files:
+            return
+        supported = VIDEO_SUFFIXES + AUDIO_SUFFIXES
+        chosen = next(
+            (path for path in files if Path(path).suffix.lower() in supported),
+            files[0],
+        )
+        self.load_file(chosen)
+        self.var_status.set(f"読み込みました: {Path(chosen).name}")
+
     def load_file(self, path: str) -> None:
+        self._close_preview()
         self.var_file.set(path)
         self.result = None
         self._set_export_enabled(False)
@@ -216,8 +376,12 @@ class SilenceCutApp:
                 pad_start=float(self.var_pad_start.get()),
                 pad_end=float(self.var_pad_end.get()),
                 adaptive=bool(self.var_adaptive.get()),
+                adaptive_margin_db=float(self.var_adaptive_margin.get()),
+                frame_ms=float(self.var_frame_ms.get()),
                 snr_min_db=float(self.var_snr.get()),
+                snr_exit_db=float(self.var_snr_exit.get()),
                 hangover=float(self.var_hangover.get()),
+                noise_percentile=float(self.var_noise_percentile.get()),
             ).validated()
         except ValueError as exc:
             raise ValueError(f"解析パラメータを確認してください: {exc}") from exc
@@ -239,6 +403,7 @@ class SilenceCutApp:
             messagebox.showerror(APP_TITLE, str(exc))
             return
 
+        self._close_preview()
         self._run(
             "解析中",
             lambda report: analyze_file(path, settings, progress=report),
@@ -277,17 +442,179 @@ class SilenceCutApp:
         plan = self._ready_plan()
         if plan is None:
             return
-        self._run(
-            "プレビュー準備中",
-            lambda report: render_preview(plan, progress=report),
-            self._on_preview_ready,
+        if not plan.keep:
+            messagebox.showwarning(
+                APP_TITLE,
+                "残す区間がありません。しきい値や最小無音長を調整してください。",
+            )
+            return
+        if self.preview_window is not None and self.preview_window.winfo_exists():
+            self._toggle_preview()
+            return
+        self._open_preview(plan)
+
+    def _open_preview(self, plan: CutPlan) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Silence Cut - プレビュー")
+        window.geometry("900x600")
+        window.minsize(640, 420)
+        window.transient(self.root)
+        window.protocol("WM_DELETE_WINDOW", self._close_preview)
+
+        outer = ttk.Frame(window, padding=8)
+        outer.pack(fill="both", expand=True)
+
+        self._preview_video = tk.Frame(outer, background="#000000", height=360)
+        self._preview_video.pack(fill="both", expand=True)
+        self._preview_video.bind("<Configure>", self._on_preview_video_configure)
+
+        controls = ttk.Frame(outer)
+        controls.pack(fill="x", pady=(8, 0))
+        self.btn_preview_play = ttk.Button(
+            controls, text="一時停止", width=10, command=self._toggle_preview,
+        )
+        self.btn_preview_play.pack(side="left")
+        ttk.Button(
+            controls, text="停止", command=self._stop_preview,
+        ).pack(side="left", padx=(6, 0))
+        self.var_preview_time = tk.StringVar()
+        ttk.Label(controls, textvariable=self.var_preview_time).pack(side="right")
+
+        self._preview_scale = ttk.Scale(
+            outer, from_=0.0, to=max(0.001, plan.output_duration),
+            orient="horizontal", command=self._on_preview_scale,
+        )
+        self._preview_scale.pack(fill="x", pady=(8, 4))
+        self._preview_scale.bind("<ButtonPress-1>", self._on_preview_seek_start)
+        self._preview_scale.bind("<ButtonRelease-1>", self._on_preview_seek_end)
+
+        self.var_preview_status = tk.StringVar(value="準備中...")
+        ttk.Label(outer, textvariable=self.var_preview_status).pack(anchor="w")
+
+        window.update_idletasks()
+        width = max(1, self._preview_video.winfo_width())
+        height = max(1, self._preview_video.winfo_height())
+        try:
+            session = PreviewSession(
+                plan, video_parent_hwnd=self._preview_video.winfo_id(),
+            )
+        except (MediaError, ValueError) as exc:
+            messagebox.showerror(APP_TITLE, str(exc))
+            window.destroy()
+            return
+
+        self.preview_window = window
+        self.preview_session = session
+        self._preview_dragging = False
+        self.var_preview_time.set(
+            f"{_fmt_time(0.0)} / {_fmt_time(session.duration)}",
+        )
+        session.resize_player(width, height)
+        try:
+            session.play(0.0)
+        except (MediaError, ValueError, OSError) as exc:
+            messagebox.showerror(APP_TITLE, str(exc))
+            self._close_preview()
+            return
+        self._update_preview()
+
+    def _on_preview_video_configure(self, event: tk.Event) -> None:
+        if self.preview_session is not None:
+            self.preview_session.resize_player(event.width, event.height)
+
+    def _toggle_preview(self) -> None:
+        session = self.preview_session
+        if session is None:
+            return
+        try:
+            if session.is_playing:
+                session.pause()
+            else:
+                session.play()
+        except (MediaError, ValueError, OSError) as exc:
+            messagebox.showerror(APP_TITLE, str(exc))
+
+    def _stop_preview(self) -> None:
+        session = self.preview_session
+        if session is not None:
+            session.stop()
+
+    def _on_preview_scale(self, value: str) -> None:
+        if not self._preview_dragging or self.preview_session is None:
+            return
+        try:
+            position = float(value)
+        except ValueError:
+            return
+        self.var_preview_time.set(
+            f"{_fmt_time(position)} / {_fmt_time(self.preview_session.duration)}",
         )
 
-    def _on_preview_ready(self, path: object) -> None:
-        if not play_file(Path(str(path))):
-            self.var_status.set("プレビューを開けませんでした")
-        else:
-            self.var_status.set("プレビューを再生しています")
+    def _on_preview_seek_start(self, _event: Optional[tk.Event] = None) -> None:
+        self._preview_dragging = True
+
+    def _on_preview_seek_end(self, _event: Optional[tk.Event] = None) -> None:
+        self._preview_dragging = False
+        session = self.preview_session
+        if session is None:
+            return
+        session.seek(float(self._preview_scale.get()))
+
+    def _update_preview(self) -> None:
+        window = self.preview_window
+        if window is None or not window.winfo_exists():
+            return
+        session = self.preview_session
+        if session is not None:
+            session.poll()
+            position = session.position
+            if not self._preview_dragging:
+                self._preview_scale.set(position)
+                self.var_preview_time.set(
+                    f"{_fmt_time(position)} / {_fmt_time(session.duration)}",
+                )
+            if session.error:
+                self.var_preview_status.set(f"エラー: {session.error}")
+            elif session.is_playing:
+                self.var_preview_status.set("再生中")
+            elif session.has_pending_seek:
+                self.var_preview_status.set("一時停止中（再生するとこの位置から再開します）")
+            elif position >= session.duration - 0.5:
+                self.var_preview_status.set("最後まで再生しました")
+            else:
+                self.var_preview_status.set("一時停止")
+            self.btn_preview_play.configure(
+                text="一時停止" if session.is_playing else "再生",
+            )
+        self._preview_after = self.root.after(100, self._update_preview)
+
+    def _close_preview(self) -> None:
+        if self._preview_after is not None:
+            try:
+                self.root.after_cancel(self._preview_after)
+            except tk.TclError:
+                pass
+            self._preview_after = None
+        if self.preview_session is not None:
+            self.preview_session.close()
+            self.preview_session = None
+        self._preview_video = None
+        if self.preview_window is not None:
+            try:
+                self.preview_window.destroy()
+            except tk.TclError:
+                pass
+            self.preview_window = None
+
+    def _on_close(self) -> None:
+        if self._file_drop is not None:
+            try:
+                self._file_drop.detach()
+            except Exception:
+                pass
+            self._file_drop = None
+        self._close_preview()
+        self.root.destroy()
 
     def export_video(self) -> None:
         plan = self._ready_plan()
@@ -331,6 +658,9 @@ class SilenceCutApp:
                 ("カットプラン JSON", "*.json"),
                 ("区間一覧 CSV", "*.csv"),
                 ("CMX3600 EDL", "*.edl"),
+                ("AviUtl 拡張編集オブジェクト", "*.exo"),
+                ("Premiere Pro / DaVinci Resolve XML", "*.xml"),
+                ("Final Cut Pro XML", "*.fcpxml"),
             ],
         )
         if not target:
@@ -490,7 +820,8 @@ class SilenceCutApp:
 
 
 def main(initial_file: Optional[str] = None) -> None:
-    root = tk.Tk()
+    from .dnd import create_root
+    root = create_root()
     style = ttk.Style(root)
     if "vista" in style.theme_names():
         style.theme_use("vista")

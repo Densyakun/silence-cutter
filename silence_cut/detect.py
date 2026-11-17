@@ -110,6 +110,9 @@ class CutPlan:
     has_video: bool = True
     has_audio: bool = True
     noise_db: Optional[float] = None
+    width: int = 0
+    height: int = 0
+    audio_sample_rate: int = 0
 
     @property
     def speech_duration(self) -> float:
@@ -171,6 +174,9 @@ class CutPlan:
                 "fps": self.fps,
                 "has_video": self.has_video,
                 "has_audio": self.has_audio,
+                "width": self.width,
+                "height": self.height,
+                "audio_sample_rate": self.audio_sample_rate,
             },
             "settings": self.settings.to_dict(),
             "threshold_db": round(self.threshold_db, 4),
@@ -202,6 +208,9 @@ def build_plan(
     fps: float = 30.0,
     has_video: bool = True,
     has_audio: bool = True,
+    width: int = 0,
+    height: int = 0,
+    audio_sample_rate: int = 0,
     activity: Optional[Sequence[bool]] = None,
 ) -> CutPlan:
     """フレームの特徴量からカットプランを作る (FFmpeg 非依存の純粋処理)。
@@ -220,6 +229,7 @@ def build_plan(
             source=source, duration=max(0.0, duration), settings=settings,
             threshold_db=settings.threshold_db, fps=fps,
             has_video=has_video, has_audio=has_audio,
+            width=width, height=height, audio_sample_rate=audio_sample_rate,
         )
 
     if activity is not None:
@@ -271,4 +281,7 @@ def build_plan(
         has_video=has_video,
         has_audio=has_audio,
         noise_db=noise_db,
+        width=width,
+        height=height,
+        audio_sample_rate=audio_sample_rate,
     )
