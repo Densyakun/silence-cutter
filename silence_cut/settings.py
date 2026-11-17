@@ -6,11 +6,15 @@ from typing import Any, Dict
 
 @dataclass(frozen=True)
 class AnalysisSettings:
-    """無音判定のパラメータ。
+    """解析パラメータ。
 
     すべて秒・dBFS 単位。dBFS は 0 dB がフルスケールで、値が小さいほど静か。
+    ``detection="silence"`` は静かな区間をカットし、
+    ``detection="speech"`` は発話区間だけを残す（無声カット）。
     """
 
+    # "silence": 無音をカット / "speech": 発話以外をカット (無声カット)
+    detection: str = "silence"
     # この値より静かな区間を無音とみなす (dBFS)
     threshold_db: float = -45.0
     # これ以上続く無音だけをカット対象にする (秒)
@@ -27,7 +31,19 @@ class AnalysisSettings:
     # 解析フレーム長 (ミリ秒)。小さいほど精度が上がるが処理は遅くなる
     frame_ms: float = 20.0
 
+    # --- 発話区間検出 (detection="speech") 用 ---
+    # 発話の開始とみなすノイズフロアからのSNR (dB)
+    snr_min_db: float = 8.0
+    # 発話の終了とみなすSNR (dB)。開始より小さくすると判定が安定する
+    snr_exit_db: float = 4.0
+    # 発話終了後に発話扱いを続ける長さ (秒)
+    hangover: float = 0.15
+    # ノイズフロア推定に使うパーセンタイル (0〜50)
+    noise_percentile: float = 10.0
+
     def validated(self) -> "AnalysisSettings":
+        if self.detection not in ("silence", "speech"):
+            raise ValueError("検出モードは 'silence' または 'speech' を指定してください")
         if not -100.0 <= self.threshold_db <= 0.0:
             raise ValueError("しきい値は -100〜0 dB の範囲で指定してください")
         if not 0.0 <= self.min_silence <= 600.0:
@@ -43,6 +59,17 @@ class AnalysisSettings:
                 raise ValueError("ノイズフロア推定パーセンタイルは 0〜100 で指定してください")
             if not 0.0 <= self.adaptive_margin_db <= 60.0:
                 raise ValueError("自動しきい値のマージンは 0〜60 dB で指定してください")
+        if self.detection == "speech":
+            if not 0.0 <= self.snr_exit_db <= 60.0:
+                raise ValueError("終了SNRは 0〜60 dB の範囲で指定してください")
+            if not 0.0 <= self.snr_min_db <= 60.0:
+                raise ValueError("開始SNRは 0〜60 dB の範囲で指定してください")
+            if self.snr_exit_db > self.snr_min_db:
+                raise ValueError("終了SNRは開始SNR以下にしてください")
+            if not 0.0 <= self.hangover <= 5.0:
+                raise ValueError("発話後ホールドは 0〜5 秒の範囲で指定してください")
+            if not 0.0 <= self.noise_percentile <= 50.0:
+                raise ValueError("ノイズフロアのパーセンタイルは 0〜50 で指定してください")
         return self
 
     def with_(self, **changes: Any) -> "AnalysisSettings":

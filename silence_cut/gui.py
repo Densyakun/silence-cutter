@@ -40,11 +40,14 @@ class SilenceCutApp:
         root.minsize(860, 600)
 
         self.var_file = tk.StringVar()
+        self.var_mode = tk.StringVar(value="silence")
         self.var_threshold = tk.StringVar(value=f"{AnalysisSettings.threshold_db:g}")
         self.var_min_silence = tk.StringVar(value=f"{AnalysisSettings.min_silence:g}")
         self.var_min_speech = tk.StringVar(value=f"{AnalysisSettings.min_speech:g}")
         self.var_pad_start = tk.StringVar(value=f"{AnalysisSettings.pad_start:g}")
         self.var_pad_end = tk.StringVar(value=f"{AnalysisSettings.pad_end:g}")
+        self.var_snr = tk.StringVar(value=f"{AnalysisSettings.snr_min_db:g}")
+        self.var_hangover = tk.StringVar(value=f"{AnalysisSettings.hangover:g}")
         self.var_adaptive = tk.BooleanVar(value=False)
         self.var_status = tk.StringVar(value="動画または音声ファイルを選択してください")
         self.var_summary = tk.StringVar(value="")
@@ -91,6 +94,33 @@ class SilenceCutApp:
         )
         adaptive.grid(row=0, column=len(fields), sticky="w", padx=(8, 0))
         self._controls.append(adaptive)
+
+        mode_row = ttk.Frame(params)
+        mode_row.grid(row=1, column=0, columnspan=len(fields) + 1, sticky="w", pady=(8, 0))
+        ttk.Label(mode_row, text="検出モード:").pack(side="left")
+        radio_silence = ttk.Radiobutton(
+            mode_row, text="無音カット（静かな区間を除去）",
+            value="silence", variable=self.var_mode,
+        )
+        radio_silence.pack(side="left", padx=(8, 0))
+        radio_speech = ttk.Radiobutton(
+            mode_row, text="無声カット（発話区間のみ残す）",
+            value="speech", variable=self.var_mode,
+        )
+        radio_speech.pack(side="left", padx=(8, 0))
+        ttk.Label(mode_row, text="SNR (dB)").pack(side="left", padx=(16, 4))
+        snr = ttk.Spinbox(
+            mode_row, textvariable=self.var_snr, from_=0, to=60,
+            increment=1, width=6,
+        )
+        snr.pack(side="left")
+        ttk.Label(mode_row, text="発話ホールド (秒)").pack(side="left", padx=(12, 4))
+        hangover = ttk.Spinbox(
+            mode_row, textvariable=self.var_hangover, from_=0, to=5,
+            increment=0.05, width=6,
+        )
+        hangover.pack(side="left")
+        self._controls.extend([radio_silence, radio_speech, snr, hangover])
 
         button_row = ttk.Frame(outer)
         button_row.pack(fill="x", pady=10)
@@ -179,12 +209,15 @@ class SilenceCutApp:
     def _read_settings(self) -> AnalysisSettings:
         try:
             return AnalysisSettings(
+                detection=self.var_mode.get(),
                 threshold_db=float(self.var_threshold.get()),
                 min_silence=float(self.var_min_silence.get()),
                 min_speech=float(self.var_min_speech.get()),
                 pad_start=float(self.var_pad_start.get()),
                 pad_end=float(self.var_pad_end.get()),
                 adaptive=bool(self.var_adaptive.get()),
+                snr_min_db=float(self.var_snr.get()),
+                hangover=float(self.var_hangover.get()),
             ).validated()
         except ValueError as exc:
             raise ValueError(f"解析パラメータを確認してください: {exc}") from exc
@@ -217,10 +250,11 @@ class SilenceCutApp:
         self.result = result
         self._set_export_enabled(True)
         self.var_summary.set(result.plan.describe())
-        self.var_status.set(
-            f"しきい値 {result.plan.threshold_db:.1f} dBFS / "
-            f"元の長さ {_fmt_time(result.plan.duration)}"
-        )
+        mode_label = "無声カット" if result.plan.settings.detection == "speech" else "無音カット"
+        detail = f"{mode_label} / しきい値 {result.plan.threshold_db:.1f} dBFS"
+        if result.plan.noise_db is not None:
+            detail += f" / ノイズフロア {result.plan.noise_db:.1f} dBFS"
+        self.var_status.set(f"{detail} / 元の長さ {_fmt_time(result.plan.duration)}")
         self._fill_table(result.plan)
         self._draw_waveform()
         self.progress["value"] = 0

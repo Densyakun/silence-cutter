@@ -69,6 +69,19 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("timeline", payload)
         self.assertTrue(payload["source"]["has_audio"])
 
+    def test_analyze_file_speech_mode(self):
+        settings = AnalysisSettings(
+            detection="speech", min_silence=0.3, min_speech=0.1,
+            pad_start=0.0, pad_end=0.0, hangover=0.05,
+        )
+        result = analyze_file(self.path, settings)
+        self.assertTrue(result.levels.has_spectral_features)
+        self.assertEqual(result.levels.sample_rate, 8000)
+        self.assertEqual(len(result.levels.zcr), len(result.levels.db))
+        self.assertEqual(result.plan.settings.detection, "speech")
+        self.assertEqual(len(result.plan.keep), 2)
+        self.assertIn("noise_db", result.plan.summary())
+
     def test_render_cuts_silence(self):
         settings = AnalysisSettings(
             threshold_db=-45.0, min_silence=0.5, min_speech=0.15,

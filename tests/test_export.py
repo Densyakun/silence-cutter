@@ -32,7 +32,7 @@ class ExportTest(unittest.TestCase):
 
     def test_plan_json_has_common_fields(self):
         data = json.loads(to_json(self.plan))
-        self.assertEqual(data["version"], 1)
+        self.assertEqual(data["version"], 2)
         self.assertEqual(data["source"]["path"], "sample.mp4")
         self.assertEqual(len(data["keep"]), 2)
         self.assertEqual(len(data["cut"]), 1)

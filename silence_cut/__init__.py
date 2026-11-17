@@ -14,8 +14,9 @@ from .detect import CutPlan, Span, build_plan
 from .media import AudioLevels, MediaError, MediaInfo, measure_levels, probe
 from .pipeline import AnalysisResult, analyze_file
 from .render import RenderSettings, render
+from .vad import SpeechActivity, detect_speech
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AnalysisResult",
@@ -26,9 +27,11 @@ __all__ = [
     "MediaInfo",
     "RenderSettings",
     "Span",
+    "SpeechActivity",
     "__version__",
     "analyze_file",
     "build_plan",
+    "detect_speech",
     "measure_levels",
     "probe",
     "render",

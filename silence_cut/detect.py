@@ -6,6 +6,8 @@ from typing import Dict, List, Optional, Sequence
 
 from .media import AudioLevels
 from .settings import AnalysisSettings
+from .thresholds import resolve_threshold
+from .vad import detect_speech
 
 # この長さ以下の隙間はカットせず発話側に吸収する (秒)
 MERGE_GAP = 0.02
@@ -29,78 +31,6 @@ class Span:
             "end": round(self.end, 6),
             "duration": round(self.duration, 6),
         }
-
-
-def percentile(values: Sequence[float], ratio: float) -> float:
-    """線形補間つきパーセンタイル (numpy 非依存)。ratio は 0.0〜1.0。"""
-    if not values:
-        raise ValueError("値が空です")
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    position = (len(ordered) - 1) * max(0.0, min(1.0, ratio))
-    lower = int(math.floor(position))
-    upper = min(lower + 1, len(ordered) - 1)
-    weight = position - lower
-    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
-
-
-def _otsu_threshold(values: Sequence[float], bins: int = 512) -> float:
-    """1 次元の 2 クラス分離（大津の手法）。しきい値の候補を返す。"""
-    if not values:
-        return -45.0
-    low = min(values)
-    high = max(values)
-    if high - low < 1.0:
-        return low
-    width = (high - low) / bins
-    histogram = [0] * bins
-    for value in values:
-        index = min(bins - 1, int((value - low) / width))
-        histogram[index] += 1
-
-    total = len(values)
-    weighted_sum = sum(
-        (low + (index + 0.5) * width) * count
-        for index, count in enumerate(histogram)
-    )
-    weight_background = 0
-    sum_background = 0.0
-    best_variance = -1.0
-    best_threshold = low
-    for index, count in enumerate(histogram):
-        weight_background += count
-        if weight_background == 0:
-            continue
-        weight_foreground = total - weight_background
-        if weight_foreground == 0:
-            break
-        sum_background += (low + (index + 0.5) * width) * count
-        mean_background = sum_background / weight_background
-        mean_foreground = (weighted_sum - sum_background) / weight_foreground
-        variance = (
-            weight_background * weight_foreground
-            * (mean_background - mean_foreground) ** 2
-        )
-        if variance > best_variance:
-            best_variance = variance
-            best_threshold = low + (index + 1) * width
-    return best_threshold
-
-
-def resolve_threshold(db: Sequence[float], settings: AnalysisSettings) -> float:
-    """固定しきい値、またはノイズフロアから推定したしきい値を返す。
-
-    自動推定では「ノイズフロア + マージン」と「2 クラス分離 (大津)」の
-    低い方を採用する。発話が大半の素材でも全カットにならないための保険。
-    """
-    if not settings.adaptive or not db:
-        return settings.threshold_db
-    noise = percentile(db, settings.adaptive_percentile / 100.0)
-    estimated = noise + settings.adaptive_margin_db
-    separated = _otsu_threshold(db)
-    threshold = min(estimated, separated)
-    return max(-80.0, min(threshold, -20.0))
 
 
 def _mask_runs(mask: List[bool]):
@@ -179,6 +109,7 @@ class CutPlan:
     fps: float = 30.0
     has_video: bool = True
     has_audio: bool = True
+    noise_db: Optional[float] = None
 
     @property
     def speech_duration(self) -> float:
@@ -216,7 +147,8 @@ class CutPlan:
         return records
 
     def summary(self) -> Dict[str, object]:
-        return {
+        data: Dict[str, object] = {
+            "mode": self.settings.detection,
             "duration": round(self.duration, 3),
             "output_duration": round(self.output_duration, 3),
             "speech_duration": round(self.speech_duration, 3),
@@ -226,10 +158,13 @@ class CutPlan:
             "cut_segments": len(self.cut),
             "threshold_db": round(self.threshold_db, 2),
         }
+        if self.noise_db is not None:
+            data["noise_db"] = round(self.noise_db, 2)
+        return data
 
     def to_dict(self) -> dict:
         return {
-            "version": 1,
+            "version": 2,
             "source": {
                 "path": self.source,
                 "duration": round(self.duration, 6),
@@ -249,8 +184,9 @@ class CutPlan:
         summary = self.summary()
         minutes, seconds = divmod(self.output_duration, 60)
         cut_minutes, cut_seconds = divmod(self.silence_duration, 60)
+        label = "非発話" if self.settings.detection == "speech" else "無音"
         return (
-            f"無音 {summary['cut_segments']} 箇所 / "
+            f"{label} {summary['cut_segments']} 箇所 / "
             f"{int(cut_minutes)}:{cut_seconds:04.1f} を除去 "
             f"({self.removed_ratio * 100:.0f}%) → "
             f"{int(minutes)}:{seconds:04.1f}"
@@ -268,21 +204,22 @@ def build_plan(
     has_audio: bool = True,
     activity: Optional[Sequence[bool]] = None,
 ) -> CutPlan:
-    """フレーム音量列からカットプランを作る (FFmpeg 非依存の純粋処理)。
+    """フレームの特徴量からカットプランを作る (FFmpeg 非依存の純粋処理)。
 
-    ``activity`` を渡すと音量しきい値の代わりにその発話判定を使う。
-    AI の VAD など外部検出器を差し込む場合の拡張点。
+    ``settings.detection`` が ``"speech"`` のときは発話区間検出 (無声カット)、
+    ``"silence"`` のときは音量しきい値による無音判定を行う。
+    ``activity`` を渡すとその判定を最優先で使う (AI の VAD などを差し込む拡張点)。
     """
     settings = settings.validated()
     duration = float(duration if duration is not None else levels.duration)
     db = levels.db
-    threshold = resolve_threshold(db, settings)
     frame_seconds = levels.frame_ms / 1000.0
 
     if not db or duration <= 0:
         return CutPlan(
             source=source, duration=max(0.0, duration), settings=settings,
-            threshold_db=threshold, fps=fps, has_video=has_video, has_audio=has_audio,
+            threshold_db=settings.threshold_db, fps=fps,
+            has_video=has_video, has_audio=has_audio,
         )
 
     if activity is not None:
@@ -292,12 +229,22 @@ def build_plan(
                 "activity のフレーム数が音声解析結果と一致しません "
                 f"({len(mask)} != {len(db)})"
             )
+        threshold = resolve_threshold(db, settings)
+        noise_db = None
+    elif settings.detection == "speech":
+        speech = detect_speech(levels, settings)
+        mask = speech.mask
+        threshold = speech.threshold_db
+        noise_db = speech.noise_db
     else:
+        threshold = resolve_threshold(db, settings)
         mask = [value >= threshold for value in db]
+        noise_db = None
+
     min_speech_frames = int(math.ceil(settings.min_speech / frame_seconds - 1e-9))
     min_silence_frames = int(math.ceil(settings.min_silence / frame_seconds - 1e-9))
 
-    # 短すぎる発話 (クリック音など) を無音へ、短すぎる無音を発話へ寄せる
+    # 短すぎる発話 (クリック音など) を非発話へ、短すぎる途切れを発話へ寄せる
     mask = _remove_short_runs(mask, min_speech_frames, True)
     mask = _remove_short_runs(mask, min_silence_frames, False)
 
@@ -323,4 +270,5 @@ def build_plan(
         fps=fps,
         has_video=has_video,
         has_audio=has_audio,
+        noise_db=noise_db,
     )

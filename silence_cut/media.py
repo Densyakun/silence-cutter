@@ -6,7 +6,7 @@ import math
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from operator import mul
 from pathlib import Path
 from typing import Callable, List, Optional, Union
@@ -168,12 +168,18 @@ def probe(path: PathLike, ffprobe: Optional[PathLike] = None) -> MediaInfo:
 
 @dataclass
 class AudioLevels:
-    """フレームごとの音量 (dBFS)。プラグイン側でもそのまま波形表示に使える。"""
+    """フレームごとの音量と発話判定用の特徴量。
+
+    ``zcr`` (ゼロ交差率) と ``low_ratio`` (1 kHz 以下の低域エネルギー比) は
+    発話区間検出 (無声カット) を使うときだけ計算される。
+    """
 
     sample_rate: int
     frame_ms: float
     db: List[float]
     duration: float
+    zcr: List[float] = field(default_factory=list)
+    low_ratio: List[float] = field(default_factory=list)
 
     @property
     def frame_seconds(self) -> float:
@@ -182,6 +188,10 @@ class AudioLevels:
     @property
     def frame_count(self) -> int:
         return len(self.db)
+
+    @property
+    def has_spectral_features(self) -> bool:
+        return bool(self.zcr) and bool(self.low_ratio)
 
     def times(self) -> List[float]:
         step = self.frame_seconds
@@ -202,12 +212,17 @@ class AudioLevels:
         return [max(floor_db, value) for value in result]
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "sample_rate": self.sample_rate,
             "frame_ms": self.frame_ms,
             "duration": self.duration,
             "db": [round(value, 2) for value in self.db],
         }
+        if self.zcr:
+            data["zcr"] = [round(value, 4) for value in self.zcr]
+        if self.low_ratio:
+            data["low_ratio"] = [round(value, 4) for value in self.low_ratio]
+        return data
 
 
 def _dot(values: array.array) -> float:
@@ -225,10 +240,12 @@ def measure_levels(
     ffmpeg: Optional[PathLike] = None,
     progress: Optional[ProgressCallback] = None,
     sample_rate: int = 16000,
+    features: bool = False,
 ) -> AudioLevels:
-    """FFmpeg でモノラル PCM にデコードしながらフレーム音量を計算する。
+    """FFmpeg でモノラル PCM にデコードしながらフレームの特徴量を計算する。
 
     音声はファイルにも外部にも送らない (ローカル処理のみ)。
+    ``features=True`` で ZCR と低域エネルギー比も計算する (発話区間検出用)。
     """
     settings = settings.validated()
     source = Path(path)
@@ -251,9 +268,15 @@ def measure_levels(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
     )
     db: List[float] = []
+    zcr: List[float] = []
+    low_ratio: List[float] = []
     log10 = math.log10
     pending = b""
     stderr = b""
+    lowpass_alpha = 1.0 - math.exp(-2.0 * math.pi * 1000.0 / sample_rate)
+    lowpass_inverse = 1.0 - lowpass_alpha
+    lowpass_state = 0.0
+    previous_sample = 1.0
     try:
         assert proc.stdout is not None
         while True:
@@ -273,7 +296,28 @@ def measure_levels(
                 length = len(chunk)
                 if length == 0:  # pragma: no cover
                     continue
-                mean_square = _dot(chunk) / length
+                if features:
+                    total = 0.0
+                    low = 0.0
+                    crossings = 0
+                    previous = previous_sample
+                    for value in chunk:
+                        total += value * value
+                        lowpass_state = (
+                            lowpass_alpha * value + lowpass_inverse * lowpass_state
+                        )
+                        low += lowpass_state * lowpass_state
+                        if (value < 0.0) != (previous < 0.0):
+                            crossings += 1
+                        previous = value
+                    previous_sample = previous
+                    mean_square = total / length
+                    zcr.append(crossings / length)
+                    low_ratio.append(
+                        min(1.0, low / total) if total > 1e-12 else 0.0
+                    )
+                else:
+                    mean_square = _dot(chunk) / length
                 value = 10.0 * log10(mean_square + 1e-12) if mean_square > 0 else SILENCE_FLOOR_DB
                 db.append(max(SILENCE_FLOOR_DB, value))
             pending = pending[complete:]
@@ -305,4 +349,6 @@ def measure_levels(
         frame_ms=settings.frame_ms,
         db=db,
         duration=duration,
+        zcr=zcr,
+        low_ratio=low_ratio,
     )

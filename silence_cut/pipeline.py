@@ -40,8 +40,12 @@ def analyze_file(
     settings = (settings or AnalysisSettings()).validated()
     source = Path(path)
     media = probe(source, ffprobe=ffprobe)
+    speech_mode = settings.detection == "speech"
     levels = measure_levels(
         source, settings, media=media, ffmpeg=ffmpeg, progress=progress,
+        # 発話区間検出は 8 kHz で十分 (特徴量計算のコストを抑える)
+        sample_rate=8000 if speech_mode else 16000,
+        features=speech_mode,
     )
     plan = build_plan(
         levels,

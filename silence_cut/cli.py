@@ -25,10 +25,12 @@ def _configure_stdio() -> None:
 
 
 def _add_analysis_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--mode", choices=("silence", "speech"), default="silence",
+                        help="silence=無音カット / speech=無声カット (発話区間のみ残す)")
     parser.add_argument("-t", "--threshold", type=float, default=AnalysisSettings.threshold_db,
                         help="無音とみなす音量 (dBFS、既定: -45)")
     parser.add_argument("-s", "--min-silence", type=float, default=AnalysisSettings.min_silence,
-                        help="カットする最小の無音長 (秒、既定: 0.5)")
+                        help="カットする最小の無音/非発話長 (秒、既定: 0.5)")
     parser.add_argument("-m", "--min-speech", type=float, default=AnalysisSettings.min_speech,
                         help="これより短い発話は無音に吸収 (秒、既定: 0.15)")
     parser.add_argument("--pad-start", type=float, default=AnalysisSettings.pad_start,
@@ -36,17 +38,27 @@ def _add_analysis_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--pad-end", type=float, default=AnalysisSettings.pad_end,
                         help="発話の後に残す余白 (秒、既定: 0.08)")
     parser.add_argument("--adaptive", action="store_true",
-                        help="ノイズフロアからしきい値を自動推定する")
+                        help="ノイズフロアからしきい値を自動推定する (無音カット用)")
     parser.add_argument("--adaptive-margin", type=float, default=AnalysisSettings.adaptive_margin_db,
                         help="自動しきい値のマージン (dB、既定: 9)")
     parser.add_argument("--frame-ms", type=float, default=AnalysisSettings.frame_ms,
                         help="解析フレーム長 (ms、既定: 20)")
+    parser.add_argument("--snr-min", type=float, default=AnalysisSettings.snr_min_db,
+                        help="発話の開始とみなすSNR (dB、無声カット用、既定: 8)")
+    parser.add_argument("--snr-exit", type=float, default=AnalysisSettings.snr_exit_db,
+                        help="発話の終了とみなすSNR (dB、無声カット用、既定: 4)")
+    parser.add_argument("--hangover", type=float, default=AnalysisSettings.hangover,
+                        help="発話終了後に発話扱いを続ける長さ (秒、既定: 0.15)")
+    parser.add_argument("--noise-percentile", type=float,
+                        default=AnalysisSettings.noise_percentile,
+                        help="ノイズフロア推定のパーセンタイル (既定: 10)")
     parser.add_argument("--ffmpeg", help="ffmpeg のパス")
     parser.add_argument("--ffprobe", help="ffprobe のパス")
 
 
 def _settings_from_args(args: argparse.Namespace) -> AnalysisSettings:
     return AnalysisSettings(
+        detection=args.mode,
         threshold_db=args.threshold,
         min_silence=args.min_silence,
         min_speech=args.min_speech,
@@ -55,6 +67,10 @@ def _settings_from_args(args: argparse.Namespace) -> AnalysisSettings:
         adaptive=args.adaptive,
         adaptive_margin_db=args.adaptive_margin,
         frame_ms=args.frame_ms,
+        snr_min_db=args.snr_min,
+        snr_exit_db=args.snr_exit,
+        hangover=args.hangover,
+        noise_percentile=args.noise_percentile,
     ).validated()
 
 
@@ -82,8 +98,13 @@ class _ProgressPrinter:
 
 
 def _print_plan(plan: CutPlan, limit: int = 40) -> None:
+    mode_label = "無声カット (発話のみ)" if plan.settings.detection == "speech" else "無音カット"
+    print(f"モード: {mode_label}")
     print(plan.describe())
-    print(f"  しきい値: {plan.threshold_db:.1f} dBFS / 元の長さ: {plan.duration:.2f} 秒")
+    detail = f"  しきい値: {plan.threshold_db:.1f} dBFS"
+    if plan.noise_db is not None:
+        detail += f" / ノイズフロア: {plan.noise_db:.1f} dBFS"
+    print(detail + f" / 元の長さ: {plan.duration:.2f} 秒")
     print()
     print("  残す区間:")
     for index, span in enumerate(plan.keep[:limit], start=1):
